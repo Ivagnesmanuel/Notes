@@ -38,13 +38,13 @@ The TCP/IP model collapses the top three OSI layers into a single Application la
 ```
   OSI                TCP/IP
   -----------        --------------
-  Application  --+
-  Presentation   +-- Application
-  Session      --+
-  Transport    ---- Transport
-  Network      ---- Internet
-  Data Link    --+
-  Physical     --+-- Network Access
+  Application  ----
+  Presentation ----  Application
+  Session      ----
+  Transport    ----  Transport
+  Network      ----  Internet
+  Data Link    ----
+  Physical     ----  Network Access
 ```
 
 ### Encapsulation and PDUs
@@ -173,7 +173,6 @@ The most common networking interview question. Here's the full story, layer by l
 The physical layer handles transmission of raw bits over a medium: copper (Ethernet cables), fiber optics, or radio (WiFi, cellular). As a software engineer, you rarely interact with this layer directly, but a few things matter:
 
 **What to know:**
-
 - **Ethernet cable categories:** Cat5e (1 Gbps), Cat6 (10 Gbps short range), Cat6a (10 Gbps longer range). Datacenter interconnects use fiber.
 - **WiFi standards:** 802.11n (WiFi 4), 802.11ac (WiFi 5), 802.11ax (WiFi 6). Higher numbers = more bandwidth, but wireless is always less reliable than wired.
 - **Bandwidth vs. latency:** bandwidth is the pipe diameter (data per second), latency is the pipe length (time for one bit to arrive). High bandwidth does not mean low latency.
@@ -345,7 +344,6 @@ CIDR replaced the old Class A/B/C system. Addresses are `IP/prefix_length`, allo
 |`/8`|255.0.0.0|16.7M|16.7M|Private class A|
 
 **VLSM (Variable Length Subnet Masking)** lets you use different prefix lengths within the same allocation — standard practice:
-
 ```
   10.0.0.0/16 (entire allocation)
   +-- 10.0.0.0/20   -- Production servers    (4094 hosts)
@@ -365,6 +363,83 @@ CIDR replaced the old Class A/B/C system. Addresses are `IP/prefix_length`, allo
 
 **Special:** `127.0.0.0/8` (loopback), `169.254.0.0/16` (link-local / DHCP failure), `0.0.0.0` (all interfaces).
 
+### Subnets and Routing Decisions
+
+A **subnet** is a logical division of IP space defined by prefix/mask. It's also a **broadcast domain** boundary—hosts within the same subnet communicate via L2 (ARP), different subnets need L3 routing.
+
+**Routing decision algorithm (on every device):**
+1. Destination & my IP → apply my subnet mask → same network prefix?
+	- **Yes** → same subnet → ARP for destination MAC → send L2 frame directly
+	- **No** → different subnet → ARP for default gateway MAC → send to router.
+2. Router receives packet → checks routing table → longest prefix match → forwards to next hop. 
+
+#### Routing scenarios
+
+| My IP/mask     | Destination IP | Same subnet?           | Next hop         | ARP target   |
+| -------------- | -------------- | ---------------------- | ---------------- | ------------ |
+| 10.0.1.10/24   | 10.0.1.20      | ✓ Yes                  | Direct L2        | 10.0.1.20    |
+| 10.0.1.10/24   | 10.0.2.50      | ✗ No                   | Gateway 10.0.1.1 | 10.0.1.1     |
+| 10.0.1.10/24   | 8.8.8.8        | ✗ No                   | Gateway 10.0.1.1 | 10.0.1.1     |
+| 192.168.1.5/26 | 192.168.1.10   | ✓ Yes (both in .0-.63) | Direct L2        | 192.168.1.10 |
+| 192.168.1.5/26 | 192.168.1.70   | ✗ No (.70 in .64-.127) | Gateway          | Gateway MAC  |
+#### Example: packet from 10.0.1.10/24 to 8.8.8.8
+
+```
+Host 10.0.1.10                Router 10.0.1.1              Internet
+      |                             |                          |
+      | 1. Check: 8.8.8.8 same subnet?                         |
+      |    10.0.1.10 & 255.255.255.0 = 10.0.1.0                |
+      |    8.8.8.8   & 255.255.255.0 = 8.8.8.0                 |
+      |    → Different! Need gateway.                          |
+      |                             |                          |
+      | 2. ARP: who has 10.0.1.1?   |                          |
+      |<--- MAC: aa:bb:cc:dd:ee:ff--|                          |
+      |                             |                          |
+      | 3. Send L2 frame:           |                          |
+      |    Dst MAC: aa:bb:cc:...    |                          |
+      |    Dst IP:  8.8.8.8  ------>|                          |
+      |                             |                          |
+      |                             | 4. Router checks table:  |
+      |                             |    0.0.0.0/0 → ISP       |
+      |                             |                          |
+      |                             | 5. New L2 frame -------->|
+      |                             |    Dst MAC: ISP router   |
+      |                             |    Dst IP: 8.8.8.8       |
+```
+
+**Key insight:** IP addresses stay constant end-to-end. MAC addresses change at each L3 hop.
+
+#### Multi-subnet enterprise example
+
+```
+VPC: 10.0.0.0/16
+
+Subnet A: 10.0.1.0/24 (web tier)     Router R1
+Subnet B: 10.0.2.0/24 (app tier)     Router R1
+Subnet C: 10.0.3.0/24 (db tier)      Router R1
+
+Host in Subnet A (10.0.1.50) → Host in Subnet B (10.0.2.100):
+  1. Different subnets → send to gateway
+  2. Gateway R1 receives → longest match: 10.0.2.0/24 → connected interface
+  3. R1 ARPs for 10.0.2.100 on Subnet B → delivers frame
+```
+
+**Routing table on R1:**
+```
+Destination       Next Hop        Interface
+10.0.1.0/24       Connected       eth0
+10.0.2.0/24       Connected       eth1
+10.0.3.0/24       Connected       eth2
+0.0.0.0/0         203.0.113.1     eth3 (default route to Internet)
+``` 
+
+**Longest prefix match examples:**
+
+| Destination | Matches                             | Winner                          |
+| ----------- | ----------------------------------- | ------------------------------- |
+| 10.0.1.25   | 10.0.1.0/24, 10.0.0.0/16, 0.0.0.0/0 | 10.0.1.0/24 (/24 most specific) |
+| 10.0.99.10  | 10.0.0.0/16, 0.0.0.0/0              | 10.0.0.0/16 (/16 beats /0)      |
+| 8.8.8.8     | 0.0.0.0/0                           | 0.0.0.0/0 (default route)       |
 ### IPv4 Packet Header
 
 ```
@@ -386,7 +461,6 @@ CIDR replaced the old Class A/B/C system. Addresses are `IP/prefix_length`, allo
 ```
 
 **Key fields explained:**
-
 - **Version (4 bits):** 4 for IPv4, 6 for IPv6.
 - **IHL (Internet Header Length, 4 bits):** header length in 32-bit words. Minimum 5 (= 20 bytes), maximum 15 (= 60 bytes with options).
 - **DSCP (Differentiated Services Code Point) / ECN (Explicit Congestion Notification):** used for QoS (Quality of Service) marking and congestion signaling.
@@ -477,19 +551,116 @@ Every router has a **routing table** mapping destination prefixes to next-hop ad
 
 ### Autonomous Systems and Routing Protocols
 
-The Internet is divided into **AS (Autonomous Systems)**, each operated by one entity (ISP, cloud provider, enterprise).
+#### Interior vs. Exterior Routing
 
-- **IGP (Interior Gateway Protocol):** runs within an AS. Finds shortest paths.
-    - **OSPF (Open Shortest Path First):** link-state (Dijkstra). Every router knows full topology. Fast convergence. Supports hierarchical areas. The standard for enterprise/ISP networks.
-    - **RIP (Routing Information Protocol):** distance-vector (Bellman-Ford). Hop count metric, max 15. Simple but slow to converge. Mostly legacy.
-- **EGP (Exterior Gateway Protocol):** runs between ASes.
-    - **BGP (Border Gateway Protocol):** the protocol that holds the Internet together. Path-vector, policy-driven. Routing decisions consider business relationships, not just shortest path.
+The Internet is a network of networks. Each organization controls an **Autonomous System (AS)** identified by an ASN (AS Number, 16 or 32-bit).
+- **IGP (Interior Gateway Protocol):** routes **within** an AS. Goal: find shortest/best paths. Administrative control is unified.
+- **EGP (Exterior Gateway Protocol):** routes **between** ASes. Goal: honor business relationships and policy, not just shortest path.
+#### OSPF (Open Shortest Path First) — Link-State IGP
 
-**Why BGP matters for software engineers:**
+**How it works:**
+1. Each router floods **LSAs (Link-State Advertisements)** describing its directly connected links (neighbors, cost/metric).
+2. Every router builds identical **topology database** of the entire network.
+3. Each router runs **Dijkstra's algorithm** (SPF = Shortest Path First) to compute best paths to every destination.
+4. Updates triggered by topology changes → fast convergence (seconds).
 
-- **Anycast** (same IP from multiple locations) is built on BGP — used by CDNs, DNS (8.8.8.8), Cloudflare.
-- BGP hijacks/misconfigurations can take your service offline or redirect traffic.
-- Multi-region failover and CDN routing depend on BGP behavior.
+**Key concepts:**
+- **Areas:** OSPF supports hierarchy. Area 0 (backbone) required; other areas connect through it. Reduces LSA flooding and routing table size.
+- **Metric:** typically based on interface bandwidth. Cost = reference bandwidth / interface bandwidth. Lower cost = better.
+- **DR/BDR (Designated Router / Backup):** on broadcast networks (Ethernet), one router is elected DR to reduce LSA flooding overhead.
+  
+**OSPF packet types:**
+
+| Type | Name                       | Purpose                                  |
+| ---- | -------------------------- | ---------------------------------------- |
+| 1    | Hello                      | Discover neighbors, maintain adjacencies |
+| 2    | DBD (Database Description) | Summarize LSA database                   |
+| 3    | LSR (Link-State Request)   | Request specific LSAs                    |
+| 4    | LSU (Link-State Update)    | Send LSAs (topology updates)             |
+| 5    | LSAck                      | Acknowledge LSAs                         |
+
+**Advantages:**
+- Fast convergence (subsecond to a few seconds).
+- Scales well with areas.
+- Loop-free (Dijkstra guarantees shortest paths).
+- Standard protocol (RFC 2328 for OSPFv2, RFC 5340 for OSPFv3/IPv6).
+
+**When used:** Enterprise networks, ISP internal networks, datacenter fabric (sometimes).  
+
+#### BGP (Border Gateway Protocol) — Path-Vector EGP
+
+**The protocol that holds the Internet together.** BGP is policy-driven, not metric-driven. Routes are chosen based on business relationships, not just hop count or bandwidth.
+
+**How it works:**
+1. BGP speakers establish **TCP connections (port 179)** with peers.
+2. Routers exchange **full routing tables** initially, then incremental updates.
+3. Each route advertisement includes the **AS path** — the list of ASes the route traversed.
+4. Loop prevention: if a router sees its own AS in the path, it rejects the route.
+
+**BGP session types:**
+
+| Type                    | Relationship           | Use case                                    |
+| ----------------------- | ---------------------- | ------------------------------------------- |
+| **eBGP** (External BGP) | Between different ASes | Internet peering, customer-provider         |
+| **iBGP** (Internal BGP) | Within the same AS     | Distribute external routes learned via eBGP |
+
+**Route selection algorithm (simplified):**
+
+BGP chooses routes based on **attributes** in this order:
+1. **Highest LOCAL_PREF** (local preference, set by policy within AS).
+2. **Shortest AS_PATH** (fewer AS hops).
+3. **Lowest ORIGIN** (IGP < EGP < incomplete).
+4. **Lowest MED** (Multi-Exit Discriminator, hint from neighbor).
+5. **eBGP over iBGP** (prefer external routes).
+6. **Lowest IGP cost to BGP next hop**.
+7. **Lowest router ID** (tiebreaker).
+
+**AS relationships:**
+
+```
+         ISP Tier 1 (AS 100)
+              |
+    +---------+---------+
+    |                   |
+Customer (AS 200)   Peer (AS 300)
+```
+- **Customer → Provider:** Customer pays provider for transit. Provider announces customer's routes to the world.
+- **Peer ↔ Peer:** Mutual agreement to exchange traffic for free (settlement-free peering). Only announce own customers, not transit routes.
+- **Provider → Customer:** Provider gives full routing table (default route or partial).
+
+**Why BGP matters for engineers:**
+
+1. **Anycast:** Same IP announced from multiple locations. BGP routing ensures clients reach the nearest POP (Point of Presence). Used by:  
+   - CDNs (Cloudflare, Akamai)
+   - DNS root servers, Google Public DNS (8.8.8.8), Cloudflare DNS (1.1.1.1)
+2. **Multi-region failover:** Cloud services use BGP to shift traffic during outages. If AWS us-east-1 fails, BGP withdraws routes, traffic goes to us-west-2.
+3. **BGP hijacks:** Malicious or accidental route announcements can redirect traffic. Examples:
+   - 2008: Pakistan Telecom hijacked YouTube's IP space, took YouTube offline globally.
+   - 2018: Misconfigured route leaked via BGP, sent traffic through China.
+4. **Traffic engineering:** By prepending AS numbers (making path look longer) or adjusting LOCAL_PREF, operators control inbound/outbound traffic flows.
+
+**BGP convergence:** Slow compared to OSPF (minutes). Updates propagate hop-by-hop across the Internet. Route flapping (unstable routes) is dampened to prevent instability.
+
+**BGP message types:**
+
+| Type         | Purpose                                       |
+| ------------ | --------------------------------------------- |
+| OPEN         | Establish BGP session, negotiate capabilities |
+| UPDATE       | Advertise/withdraw routes                     |
+| KEEPALIVE    | Maintain session (sent every 60s by default)  |
+| NOTIFICATION | Error, close session                          |
+#### Comparison Table
+| Aspect              | OSPF                     | BGP                                    |
+| ------------------- | ------------------------ | -------------------------------------- |
+| **Type**            | Link-state IGP           | Path-vector EGP                        |
+| **Scope**           | Within AS                | Between ASes                           |
+| **Metric**          | Cost (bandwidth-based)   | Policy (AS_PATH, LOCAL_PREF, etc.)     |
+| **Algorithm**       | Dijkstra (SPF)           | Best path selection (policy-driven)    |
+| **Convergence**     | Fast (seconds)           | Slow (minutes)                         |
+| **Transport**       | IP protocol 89           | TCP port 179                           |
+| **Scalability**     | Medium (areas help)      | Massive (Internet-scale, 900k+ routes) |
+| **Loop prevention** | Topology knowledge       | AS_PATH loop detection                 |
+| **Primary use**     | Enterprise, ISP internal | Internet routing, multi-AS             |
 
 ---
 
@@ -564,18 +735,76 @@ This is how a web server handles thousands of connections on port 443 — each c
 
 Reliable, ordered, byte-stream delivery. Turns unreliable IP into a pipe applications can trust.
 
+#### TCP Header (20 bytes minimum, up to 60 bytes with options)
+
+```
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |          Source Port          |       Destination Port        |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                        Sequence Number                        |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                    Acknowledgment Number                      |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |  Data |       |U|A|P|R|S|F|                                   |
+   |Offset |Reserv.|R|C|S|S|Y|I|            Window                 |
+   |       |       |G|K|H|T|N|N|                                   |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |           Checksum            |         Urgent Pointer        |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                    Options (if Data Offset > 5)               |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                            Data                               |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+```
+
+#### Key fields
+
+| Field                 |     Size | Meaning                             |
+| --------------------- | -------: | ----------------------------------- |
+| Source Port           |  16 bits | Sending application port            |
+| Destination Port      |  16 bits | Receiving application port          |
+| Sequence Number       |  32 bits | Byte position in the stream         |
+| Acknowledgment Number |  32 bits | Next expected byte                  |
+| Data Offset           |   4 bits | TCP header length in 32-bit words   |
+| Reserved              |   3 bits | Reserved for future use             |
+| Flags                 |   6 bits | URG, ACK, PSH, RST, SYN, FIN        |
+| Window                |  16 bits | Receiver-advertised buffer space    |
+| Checksum              |  16 bits | Error check for header and data     |
+| Urgent Pointer        |  16 bits | End of urgent data, if URG is set   |
+| Options               | Variable | MSS, Window Scale, SACK, Timestamps |
+
+#### TCP flags
+
+- **SYN** — start connection, synchronize sequence numbers
+- **ACK** — acknowledgment field is valid
+- **FIN** — graceful close
+- **RST** — reset connection immediately
+- **PSH** — push data to application promptly
+- **URG** — urgent pointer is valid
+
+#### Common flag combinations
+
+- `SYN` — client starts handshake
+- `SYN-ACK` — server replies
+- `ACK` — handshake completed / normal acknowledgment
+- `PSH-ACK` — data packet
+- `FIN-ACK` — graceful shutdown
+- `RST` — abort / refused connection
+
 #### Three-Way Handshake
 
 ```
   Client                            Server
-    |                                  |
+    |                                 |
     |--- SYN (seq=x) --------------->>|  Client picks ISN
-    |                                  |  (Initial Sequence Number) x
+    |                                 |  (Initial Sequence Number) x
     |<<- SYN-ACK (seq=y, ack=x+1) ----|  Server picks ISN y,
-    |                                  |  acknowledges x+1
+    |                                 |  acknowledges x+1
     |--- ACK (seq=x+1, ack=y+1) ---->>|  Connection open.
-    |                                  |  Can carry data.
-    |         <--- 1 RTT --->          |
+    |                                 |  Can carry data.
+    |         <--- 1 RTT --->         |
 ```
 
 Costs **1 RTT (Round-Trip Time)** before data flows. Add TLS 1.3 (another RTT) = **2 RTTs** before the first byte of application data on a new HTTPS connection.
@@ -739,26 +968,26 @@ TLS encrypts the communication channel between two parties, providing three guar
 
 ```
   Client                                     Server
-    |                                           |
+    |                                          |
     |-- ClientHello ------------------------->>|
     |   - supported cipher suites              |
     |   - key share (client's DH public key)   |
     |   - supported TLS versions               |
-    |                                           |
-    |<<- ServerHello + EncryptedExtensions -----|
+    |                                          |
+    |<<- ServerHello + EncryptedExtensions ----|
     |   - chosen cipher suite                  |
     |   - key share (server's DH public key)   |
     |   - server certificate                   |
     |   - certificate verify (signature)       |
     |   - finished (MAC of handshake)          |
-    |                                           |
-    |   (both sides derive session keys         |
-    |    from the DH key exchange)              |
-    |                                           |
+    |                                          |
+    |   (both sides derive session keys        |
+    |    from the DH key exchange)             |
+    |                                          |
     |-- Finished ---------------------------->>|
     |   (MAC of handshake)                     |
-    |                                           |
-    |<<========= encrypted data ===========>>=|
+    |                                          |
+    |<<========== encrypted data ===========>>=|
 ```
 
 **Key exchange:** TLS 1.3 exclusively uses ephemeral Diffie-Hellman (ECDHE — Elliptic Curve Diffie-Hellman Ephemeral). Every connection generates fresh keys, providing **forward secrecy** — if the server's private key is compromised later, past sessions can't be decrypted.
@@ -783,13 +1012,456 @@ TLS encrypts the communication channel between two parties, providing three guar
 
 ### WebSocket
 
-Upgrades an HTTP/1.1 connection to persistent, full-duplex communication. After the initial HTTP handshake (`101 Switching Protocols`), both sides exchange frames freely. Used for chat, live updates, collaborative editing.
+WebSocket is a protocol for **persistent, full-duplex communication over a single TCP connection**. Unlike HTTP’s request/response model, both client and server can send messages **at any time** after the connection is established.
 
-**Alternative:** SSE (Server-Sent Events) for simpler one-way push — it's plain HTTP and works with standard proxies/CDNs without special config.
+Defined in **RFC 6455**. Typically runs over:
+- `ws://` → WebSocket over TCP
+- `wss://` → WebSocket over TLS (same port as HTTPS, 443)
+
+Most real deployments use **wss://** because browsers require secure contexts for many features.
+
+#### HTTP Upgrade Handshake
+
+WebSocket starts as an **HTTP/1.1 request** and upgrades the connection.
+
+```
+Client                                    Server
+  |                                         |
+  |-- HTTP GET /chat --------------------->|
+  |   Host: example.com                    |
+  |   Upgrade: websocket                   |
+  |   Connection: Upgrade                  |
+  |   Sec-WebSocket-Key: x3JJHMbDL1Ez...   |
+  |   Sec-WebSocket-Version: 13             |
+  |                                         |
+  |<<- HTTP/1.1 101 Switching Protocols ----|
+  |   Upgrade: websocket                    |
+  |   Connection: Upgrade                   |
+  |   Sec-WebSocket-Accept: HSmrc0sMl...    |
+  |                                         |
+  |<<=========== WebSocket frames =========>>|
+```
+
+Key points:
+- **`Upgrade: websocket`** tells the server to switch protocols.
+- **`Sec-WebSocket-Key`** is a random value generated by the client.
+- The server returns **`Sec-WebSocket-Accept`**, which is a SHA-1 hash of the key + a magic GUID.
+- The `101 Switching Protocols` response confirms the upgrade.
+
+After this, the connection is **no longer HTTP** — it becomes raw WebSocket frames.
+
+#### WebSocket Frame Format
+
+Communication happens through **frames**.
+
+```
+0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5
++---------------+---------------+
+| FIN | OPCODE  | MASK | LENGTH |
++---------------+---------------+
+|     Payload length (extended) |
++-------------------------------+
+| Masking key (client -> srv)   |
++-------------------------------+
+| Payload data                  |
++-------------------------------+
+```
+
+Important fields:
+
+|Field|Meaning|
+|---|---|
+|FIN|Whether this is the final frame of a message|
+|Opcode|Frame type (text, binary, ping, pong, close)|
+|Mask|Client frames must be masked|
+|Payload|Actual message data|
+
+Common opcodes:
+
+|Opcode|Type|
+|---|---|
+|0x1|Text frame|
+|0x2|Binary frame|
+|0x8|Connection close|
+|0x9|Ping|
+|0xA|Pong|
+
+#### Connection Lifecycle
+
+```
+1. HTTP Upgrade handshake
+2. Persistent full-duplex messaging
+3. Heartbeats (ping/pong)
+4. Close handshake
+```
+
+Closing sequence:
+
+```
+Client -> Close frame
+Server -> Close frame
+TCP connection closes
+```
+
+#### Scaling WebSocket Systems
+
+WebSocket introduces **stateful connections**, which complicates scaling.
+
+Key challenges:
+
+**1. Long-lived connections**
+
+Unlike HTTP requests, connections stay open for minutes or hours.
+
+Implications:
+- File descriptor limits
+- Memory per connection
+- Event loop scalability
+
+Large deployments often use:
+- **event-driven servers** (Node.js, Netty, Go, Rust async)
+- **epoll / kqueue**
+
+
+**2. Load balancing**
+
+WebSocket requires **connection affinity**.
+
+Common approaches:
+
+|Strategy|Description|
+|---|---|
+|Sticky sessions|Load balancer pins client to one backend|
+|Connection router|Dedicated gateway handles connections|
+|Pub/Sub backend|Servers share events via Redis/Kafka|
+
+Example architecture:
+
+```
+Clients
+   |
+   v
+Load Balancer
+   |
+   +---- WS Server A ----+
+   |                     |
+   +---- WS Server B ----+---- Redis / Kafka PubSub
+   |                     |
+   +---- WS Server C ----+
+```
+
+When a message arrives:
+1. Client sends message to connected server
+2. Server publishes to message broker
+3. Other servers forward to their clients
+
+#### WebSocket vs SSE
+
+**Server-Sent Events (SSE)** is a simpler alternative for **one-way streaming**.
+
+|Feature|WebSocket|SSE|
+|---|---|---|
+|Direction|Bidirectional|Server → Client|
+|Transport|Custom protocol|HTTP|
+|Binary support|Yes|No|
+|Reconnection|Manual|Built-in|
+|Proxy compatibility|Sometimes tricky|Excellent|
+
+SSE works well for:
+- notifications
+- activity feeds
+- dashboards
+
+WebSocket is preferred for:
+- chat
+- multiplayer games
+- collaborative editing
+- real-time trading
+
+#### WebSocket in Production
+
+Common issues engineers encounter:
+
+**Idle timeouts**
+
+Many proxies terminate idle connections:
+
+|Component|Typical timeout|
+|---|---|
+|Nginx|60s default|
+|AWS ALB|60s|
+|Cloudflare|100s|
+
+Solution: **heartbeat ping/pong frames**.
+
+**Backpressure**
+
+If the client cannot process messages fast enough:
+- buffers grow
+- memory spikes
+- connection may be dropped
+
+Production servers implement:
+- send queues
+- rate limits
+- slow consumer detection
+
+**Authentication**
+
+Options include:
+
+|Method|Notes|
+|---|---|
+|Cookie session|works for browser apps|
+|JWT in query param|common but visible in logs|
+|JWT in `Authorization` header|preferred|
+|Auth during HTTP upgrade|most secure|
+
+After authentication, servers often attach a **user ID to the connection state**.
 
 ### gRPC (Google Remote Procedure Call)
 
-RPC (Remote Procedure Call) framework built on HTTP/2 + Protocol Buffers. Binary serialization, bidirectional streaming, code generation. Common in microservice architectures. Requires HTTP/2-aware infrastructure.
+gRPC is a **high-performance RPC framework** developed by Google. It uses:
+- **HTTP/2** for transport
+- **Protocol Buffers (Protobuf)** for serialization
+- **generated client/server code**
+
+Instead of designing REST endpoints, you define **methods in a service interface**.
+
+#### Basic gRPC Service Definition
+
+Services are defined in `.proto` files.
+
+```
+syntax = "proto3";
+
+service UserService {
+  rpc GetUser (UserRequest) returns (UserResponse);
+}
+
+message UserRequest {
+  int64 user_id = 1;
+}
+
+message UserResponse {
+  int64 id = 1;
+  string name = 2;
+  string email = 3;
+}
+```
+
+From this file, the gRPC toolchain generates:
+- client stubs
+- server interfaces
+- serialization code
+
+Supported languages include Go, Java, Python, C++, Rust, Node, etc.
+
+#### How a gRPC Request Works
+
+gRPC runs over **HTTP/2 streams**.
+
+```
+Client                             Server
+  |                                  |
+  |-- HEADERS (method, metadata) --->|
+  |-- DATA (protobuf message) ------>|
+  |                                  |
+  |<<- HEADERS (status) -------------|
+  |<<- DATA (protobuf response) -----|
+  |<<- TRAILERS (grpc-status) -------|
+```
+
+Important HTTP/2 features used:
+- **multiplexed streams**
+- **flow control**
+- **header compression**
+- **persistent connections**
+
+#### Serialization: Protocol Buffers
+
+Protobuf is a **binary serialization format**.
+
+Example message:
+```
+UserResponse {
+  id: 42
+  name: "Alice"
+}
+```
+
+Encoded as compact binary fields:
+```
+08 2A 12 05 41 6C 69 63 65
+```
+
+Advantages:
+
+|Benefit|Explanation|
+|---|---|
+|Compact|Much smaller than JSON|
+|Fast|Binary parsing|
+|Schema evolution|Backward compatible field additions|
+|Strong typing|Generated code|
+
+#### gRPC Communication Patterns
+
+gRPC supports **four types of RPC**.
+
+|Type|Description|
+|---|---|
+|Unary|Single request → single response|
+|Server streaming|Client request → server stream|
+|Client streaming|Client stream → server response|
+|Bidirectional streaming|Both sides stream|
+
+**Unary RPC**
+```
+Client ---- request ----> Server
+Client <--- response ---- Server
+```
+Equivalent to typical REST calls.
+
+**Server Streaming**
+```
+Client ---- request ----> Server
+Client <--- msg1 -------- Server
+Client <--- msg2 -------- Server
+Client <--- msg3 -------- Server
+```
+Used for:
+- logs
+- analytics
+- live feeds
+
+**Client Streaming**
+```
+Client ---- msg1 ------> Server
+Client ---- msg2 ------> Server
+Client ---- msg3 ------> Server
+Client <--- response --- Server
+```
+Useful for:
+- file uploads
+- batch ingestion
+
+**Bidirectional Streaming**
+```
+Client ---- msg1 ------> Server
+Client <--- msgA ------ Server
+Client ---- msg2 ------> Server
+Client <--- msgB ------ Server
+```
+Used for:
+- chat systems
+- telemetry
+- collaborative apps
+
+#### gRPC Metadata
+
+gRPC supports **metadata headers**, similar to HTTP headers.
+
+Examples:
+```
+authorization: Bearer <token>
+x-request-id: abc123
+grpc-timeout: 500m
+```
+
+Metadata is used for:
+- authentication
+- tracing
+- deadlines
+- routing
+
+#### Deadlines and Cancellation
+
+Clients can set **deadlines** to avoid hanging requests.
+```
+context.WithTimeout(ctx, 200ms)
+```
+
+If the server doesn't respond in time:
+- the client cancels the request
+- server receives cancellation signal
+
+This is important for **microservice resilience**.
+
+#### gRPC Load Balancing
+
+gRPC supports multiple balancing strategies:
+
+|Strategy|Description|
+|---|---|
+|Pick-first|First healthy backend|
+|Round-robin|Simple rotation|
+|xDS|Advanced service mesh config|
+
+In Kubernetes, common setups are:
+```
+Client
+  |
+  v
+Envoy / Service Mesh
+  |
+  v
+gRPC service pods
+```
+
+#### gRPC vs REST — Performance
+
+Typical differences:
+
+|Aspect|REST (JSON)|gRPC (Protobuf)|
+|---|---|---|
+|Payload size|Larger|Smaller|
+|Serialization|Slow|Fast|
+|Connection|Often short-lived|Persistent|
+|Latency|Higher|Lower|
+
+In internal microservices, gRPC can reduce:
+- latency
+- CPU usage
+- bandwidth
+
+#### gRPC in Browsers
+
+Browsers **cannot directly use full gRPC** because they lack raw HTTP/2 framing control.
+
+Solutions:
+
+|Approach|Description|
+|---|---|
+|grpc-web|Browser-compatible gRPC variant|
+|Envoy proxy|Translates grpc-web → gRPC|
+|REST gateway|Expose REST alongside gRPC|
+
+Architecture example:
+```
+Browser
+   |
+   v
+grpc-web
+   |
+   v
+Envoy Proxy
+   |
+   v
+gRPC Services
+```
+
+#### When to Use gRPC
+
+Good fit:
+- microservice architectures
+- high-performance internal APIs
+- strongly typed service contracts
+- streaming workloads
+
+Less ideal for:
+- public APIs
+- browser-only clients
+- simple CRUD APIs
 
 ### REST vs. GraphQL vs. gRPC
 
@@ -897,50 +1569,209 @@ Most consumer and cloud NAT is **PAT** (also called "NAT overload" or "NAPT").
 - **Port exhaustion:** 16-bit port field = ~65K mappings per public IP. High-traffic NAT gateways can exhaust this, causing connection failures. Solution: add more public IPs.
 - **Hairpin NAT:** when a host behind NAT tries to access another host behind the same NAT using the public IP. Not all NAT implementations support this — can cause confusing connectivity issues.
 
-### DNS (Domain Name System)
+### DNS (Domain Name System) 
 
-Translates names to IP addresses. Globally distributed, hierarchical, eventually-consistent database.
+DNS translates human-readable names (example.com) to IP addresses (93.184.216.34). It's a distributed, hierarchical database with caching at every level.  
 
-#### Resolution Process
+#### DNS Record Types
+
+| Type      | Purpose                                  | Example                                      |
+| --------- | ---------------------------------------- | -------------------------------------------- |
+| **A**     | Name → IPv4 address                      | `example.com. → 93.184.216.34`               |
+| **AAAA**  | Name → IPv6 address                      | `example.com. → 2606:2800:220:1:...`         |
+| **CNAME** | Alias to another name                    | `www.example.com. → example.com.`            |
+| **MX**    | Mail server for domain                   | `example.com. → 10 mail.example.com.`        |
+| **NS**    | Authoritative nameserver                 | `example.com. → ns1.example.com.`            |
+| **TXT**   | Arbitrary text (SPF, DKIM, verification) | `example.com. → "v=spf1 include:..."`        |
+| **SRV**   | Service discovery (host + port)          | `_sip._tcp.example.com. → server:5060`       |
+| **PTR**   | Reverse lookup (IP → name)               | `34.216.184.93.in-addr.arpa. → example.com.` |
+| **SOA**   | Zone authority, serial, timers           | Metadata about the zone                      |
+| **CAA**   | Certificate authority authorization      | Which CAs can issue certs for domain         |
+**TTL (Time To Live):** How long a record can be cached (in seconds). Short TTL (60-300s) for records that change often, long TTL (3600-86400s) for stable ones.
+
+#### DNS Resolution Process
+
+**Stub resolver** (on your machine) → **Recursive resolver** (ISP or 8.8.8.8) → **Root servers** → **TLD servers** → **Authoritative nameservers**
 
 ```
-  Your app              Recursive Resolver       Root        .com TLD      Authoritative NS
-  (getaddrinfo)         (8.8.8.8)                Server      Server        for example.com
-     |                       |                      |           |               |
-     |-- example.com? ----->|                       |           |               |
-     |                       |-- where is .com? --->|           |               |
-     |                       |<- try 192.5.6.30 ----|           |               |
-     |                       |-- where is example.com? ------->|               |
-     |                       |<- try ns1.example.com ----------|               |
-     |                       |-- A record? ---------------------------------------->|
-     |                       |<- 93.184.216.34 (TTL 3600) -------------------------|
-     |<- 93.184.216.34 -----|   (cached for 3600s)                                 |
+  Your app              Recursive Resolver        Root       .com TLD      Authoritative
+  (stub resolver)       (8.8.8.8, 1.1.1.1)        Server      Server       for example.com
+      |                         |                   |            |                |
+      |-- example.com? -------->|                   |            |                |
+      |                         |                   |            |                |
+      |                         |-- Where is .com?->|            |                |
+      |                         |<-- Try 192.5.5.241 ------------|                |
+      |                         |                                |                |
+      |                         |-- Where is example.com? ------>|                |
+      |                         |<-- Try ns1.example.com -----------------------  |
+      |                         |                                                 |
+      |                         |-- A record for example.com? ------------------->|
+      |                         |<-- 93.184.216.34, TTL 3600 ---------------------|
+      |                         |                                                 |
+      |                         | (caches for 3600s)                              |
+      |<-- 93.184.216.34 -------|                                                 |
+      |                         |                                                 |
 ```
 
-#### Record Types
+**Iterative vs. Recursive:**
+- **Recursive query:** client asks recursive resolver, which does all the work and returns final answer.
+- **Iterative query:** recursive resolver asks root → root says "ask .com" → resolver asks .com → .com says "ask ns1.example.com" → resolver asks ns1 → ns1 returns answer.
 
-|Type|Purpose|Example|
-|---|---|---|
-|**A**|Name -> IPv4|`example.com -> 93.184.216.34`|
-|**AAAA**|Name -> IPv6|`example.com -> 2606:2800:...`|
-|**CNAME**|Alias to another name|`www.example.com -> example.com`|
-|**MX**|Mail server for the domain|`example.com -> mail.example.com`|
-|**NS**|Authoritative nameserver|`example.com -> ns1.example.com`|
-|**TXT**|Arbitrary text (SPF, DKIM, verification)|`"v=spf1 include:..."`|
-|**SRV**|Service discovery (host + port)|`_sip._tcp.example.com`|
-|**PTR**|Reverse lookup (IP -> name)|`34.216.184.93 -> example.com`|
+Most clients use recursive resolvers (configured via DHCP or manually set to 8.8.8.8, 1.1.1.1, etc.). Recursive resolvers do iterative queries to authoritative servers.
 
-#### DNS in Practice
+#### Caching and TTL
 
-- **TTL (Time To Live):** low (60s) = fast failover, more queries. High (3600s) = fewer queries, slow changes. Typical production: 300-3600s.
-- **DNS load balancing:** return different IPs per query (round-robin, geo-based, weighted). Every CDN does this.
-- **Debugging:** `dig +short example.com` for quick lookup, `dig +trace` for full resolution chain.
-- **DoH (DNS over HTTPS) / DoT (DNS over TLS):** encrypts queries, increasingly default in browsers.
+DNS caching happens at **multiple levels:**
+1. **Browser cache:** Chrome, Firefox cache DNS for a few minutes.
+2. **OS cache:** `systemd-resolved` (Linux), `mDNSResponder` (macOS), DNS Client service (Windows).
+3. **Recursive resolver cache:** 8.8.8.8, 1.1.1.1 cache heavily.
+4. **Authoritative server cache:** sometimes caches responses from upstream. 
 
-> **Security threats:** DNS spoofing/cache poisoning, DNS exfiltration (encoding data in queries), DNS amplification (DDoS via open resolvers). DNSSEC (DNS Security Extensions) adds cryptographic signatures but adoption is slow.
+**Negative caching:** NXDOMAIN (non-existent domain) responses are cached too, controlled by the SOA record's negative TTL. Prevents repeated lookups for typos.
+**Cache poisoning:** Attackers inject fake DNS responses into resolver caches. Mitigations: DNSSEC (cryptographic signatures), randomized query IDs, source port randomization.
+
+#### Common DNS Tools and Examples
+
+**`dig` (domain information groper) — the standard DNS query tool**
+
+Basic query:
+```bash
+$ dig example.com
+
+; <<>> DiG 9.18.24 <<>> example.com
+;; ANSWER SECTION:
+example.com.    3600  IN  A 93.184.216.34
+```  
+
+Query specific record type:
+```bash
+$ dig example.com AAAA
+$ dig example.com MX
+$ dig example.com TXT
+```
+
+**Trace full resolution path:**
+```bash
+$ dig +trace example.com
+
+.     86400 IN  NS  a.root-servers.net.
+.     86400 IN  NS  b.root-servers.net.
+[... root servers ...]
+
+com.      172800  IN  NS  a.gtld-servers.net.
+[... .com TLD servers ...]
+
+example.com.    172800  IN  NS  ns1.example.com.
+example.com.    172800  IN  NS  ns2.example.com.  
+
+example.com.    3600  IN  A 93.184.216.34
+```
+
+This shows the exact path: root → .com TLD → authoritative.
+
+**Query specific nameserver:**
+```bash
+$ dig @8.8.8.8 example.com         # Use Google DNS
+$ dig @1.1.1.1 example.com         # Use Cloudflare DNS
+$ dig @ns1.example.com example.com # Query authoritative directly
+
+```
+
+**Short answer only:**
+```bash
+$ dig +short example.com
+93.184.216.34
+```
+
+**Reverse DNS lookup (PTR):**
+```bash
+$ dig -x 93.184.216.34
+# Returns: 34.216.184.93.in-addr.arpa. → (reverse pointer if set)
+```
+
+#### Operational Gotchas and Best Practices
+
+**CNAME at apex:** You **cannot** have a CNAME at the zone apex (bare domain). This breaks DNS:
+```
+❌ example.com.  CNAME  other.com.   # Invalid! Breaks MX, NS, SOA
+✅ www.example.com.  CNAME  example.com.  # Valid
+```
+**Solution:** Use A/AAAA records at apex, or services like Cloudflare's "CNAME flattening" or AWS Route 53's Alias records.
+
+**Long TTLs during migrations:** If you set TTL = 86400 (24h), DNS changes take a full day to propagate. Before migrations:
+1. Lower TTL to 60-300s a day in advance.
+2. Make the change.
+3. Wait for old TTL to expire.
+4. Raise TTL back to normal.
+
+**DNS propagation myths:** There's no global "propagation delay." It's just caching:
+- If TTL = 3600s, old value can persist up to 1 hour in caches.
+- Some resolvers ignore TTL and cache longer (bad behavior, but happens).
+- `dig +trace` bypasses caches and queries authoritative servers directly.
+
+**Split-horizon DNS:** Different answers based on client location:
+- Internal clients (10.0.0.0/8) see `internal.example.com → 10.0.1.50`
+- External clients see `internal.example.com → NXDOMAIN` or public IP.
+
+Used for internal services, cloud VPCs, CDNs (geo-based routing).
+
+**Anycast DNS:** Servers at multiple locations share the same IP (e.g., 8.8.8.8). BGP routing sends queries to the nearest POP. Provides low latency and DDoS resilience.
+
+#### DNS and Performance
+
+- **Latency impact:** First request to a domain pays DNS lookup cost (~20-100ms). Subsequent requests use cache.
+- **DNS prefetching:** Browsers can prefetch DNS for links on a page: `<link rel="dns-prefetch" href="//cdn.example.com">`
+- **HTTP/2 and HTTP/3 connection coalescing:** Multiple domains can share one connection if they resolve to the same IP and have valid certs.
+
+**DNS over HTTPS (DoH) and DNS over TLS (DoT):**
+- Traditional DNS queries are **plaintext UDP/53** — ISPs can see and intercept.
+- **DoT (port 853):** Encrypted DNS over TLS.
+- **DoH (HTTPS):** Encrypted DNS over HTTPS (looks like web traffic).
+- Privacy benefit: ISP can't see what domains you look up.
+- Supported by browsers (Firefox, Chrome) and resolvers (Cloudflare, Google).
+
+#### Linux DNS Commands
+
+**Check current DNS resolver config:**
+```bash
+$ cat /etc/resolv.conf
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+
+# On systemd systems:
+$ resolvectl status
+```
+
+**Flush DNS cache:**
+```bash
+# systemd-resolved:
+$ sudo resolvectl flush-caches
+
+# macOS:
+$ sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder
+
+# Windows:
+> ipconfig /flushdns
+```
+
+**Test DNS with `nslookup` (legacy but still common):**
+```bash
+$ nslookup example.com
+Server:   8.8.8.8
+Address:  8.8.8.8#53
+
+Name: example.com
+Address: 93.184.216.34
+```
+
+**Test DNS with `host` (simpler output):**
+```bash
+$ host example.com
+example.com has address 93.184.216.34
+example.com has IPv6 address 2606:2800:220:1:...
+```
 
 ---
-
 ## 8. Network Security
 
 ### Firewalls
