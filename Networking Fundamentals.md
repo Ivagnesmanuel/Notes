@@ -1,3 +1,9 @@
+# Networking Fundamentals
+
+A quick-reference guide covering networking's core concepts.
+
+---
+
 ## Table of Contents
 
 1. The Layered Model — Overview
